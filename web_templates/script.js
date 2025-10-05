@@ -141,13 +141,33 @@ function finalize_user_message(fullText) {
     }
 }
 
-// Finalize Gemini voice message
+// Finalize Gemini voice message with optional frame data
 eel.expose(finalize_gemini_message);
-function finalize_gemini_message(fullText) {
+function finalize_gemini_message(fullText, frameData = null) {
     if (currentGeminiMessage) {
         const strong = currentGeminiMessage.querySelector('strong');
         strong.textContent = 'Gemini:';
         currentGeminiMessage.classList.remove('voice-transcript');
+
+        // Add frame thumbnail if available
+        if (frameData) {
+            const frameContainer = document.createElement('div');
+            frameContainer.className = 'frame-container';
+
+            const img = document.createElement('img');
+            img.src = `data:${frameData.mime_type};base64,${frameData.image}`;
+            img.className = 'captured-frame';
+            img.alt = 'Captured frame';
+
+            const caption = document.createElement('div');
+            caption.className = 'frame-caption';
+            caption.textContent = `📷 Captured ${frameData.frame_count} frame${frameData.frame_count !== 1 ? 's' : ''} (${frameData.duration}s)`;
+
+            frameContainer.appendChild(img);
+            frameContainer.appendChild(caption);
+            currentGeminiMessage.appendChild(frameContainer);
+        }
+
         currentGeminiMessage = null;
     }
 }

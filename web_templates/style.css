@@ -219,3 +219,32 @@ button:disabled {
 .gemini-message.voice-transcript {
     border-left: 3px solid #10b981;
 }
+
+/* Frame display in messages */
+.frame-container {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid #e5e7eb;
+}
+
+.captured-frame {
+    max-width: 200px;
+    max-height: 150px;
+    border-radius: 8px;
+    border: 2px solid #e5e7eb;
+    display: block;
+    cursor: pointer;
+    transition: transform 0.2s;
+}
+
+.captured-frame:hover {
+    transform: scale(1.05);
+    border-color: #667eea;
+}
+
+.frame-caption {
+    margin-top: 6px;
+    font-size: 11px;
+    color: #6b7280;
+    font-style: italic;
+}

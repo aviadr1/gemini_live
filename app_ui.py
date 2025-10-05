@@ -46,8 +46,51 @@ class UIAudioLoop(AudioLoop):
         self.should_stop = False
         self.current_user_transcript = []  # Accumulate user transcription chunks
         self.current_gemini_transcript = []  # Accumulate Gemini transcription chunks
+        self.latest_frame = None  # Store the most recent frame
+        self.frame_count = 0  # Count frames captured during current turn
+        self.turn_start_time = None  # Track when turn started
 
-    async def send_text(self) -> None:
+    async def get_frames(self) -> None:
+        """
+        Override to track frames for UI display.
+        """
+        import cv2
+        import PIL.Image
+        import io
+        import base64
+
+        cap = await asyncio.to_thread(cv2.VideoCapture, 0)
+
+        while not self.should_stop:
+            frame = await asyncio.to_thread(self._get_frame, cap)
+            if frame is None:
+                break
+
+            # Store the latest frame for display in UI
+            self.latest_frame = frame
+            self.frame_count += 1
+
+            await asyncio.sleep(1.0)
+            await self.out_queue.put(frame)
+
+        cap.release()
+
+    async def get_screen(self) -> None:
+        """
+        Override to track screen captures for UI display.
+        """
+        while not self.should_stop:
+            frame = await asyncio.to_thread(self._get_screen)
+            if frame is None:
+                break
+
+            # Store the latest frame for display in UI
+            self.latest_frame = frame
+            self.frame_count += 1
+
+            await asyncio.sleep(1.0)
+            await self.out_queue.put(frame)
+
         """Modified to wait for UI messages instead of console input."""
         while not self.should_stop:
             await asyncio.sleep(0.1)
@@ -60,8 +103,11 @@ class UIAudioLoop(AudioLoop):
             try:
                 turn = self.session.receive()
 
-                # Reset Gemini transcript at start of new turn
+                # Reset for new turn
                 self.current_gemini_transcript = []
+                self.frame_count = 0
+                import time
+                self.turn_start_time = time.time()
 
                 async for response in turn:
                     if self.should_stop:
@@ -81,12 +127,11 @@ class UIAudioLoop(AudioLoop):
                         print(text, end="")
                         continue
 
-                    # NEW: Handle input transcription (what YOU said)
+                    # Handle input transcription (what YOU said)
                     if response.server_content.input_transcription:
                         transcript_text = response.server_content.input_transcription.text
                         self.current_user_transcript.append(transcript_text)
 
-                        # Send to UI incrementally
                         try:
                             eel.add_user_transcription(transcript_text)
                         except Exception as e:
@@ -94,12 +139,11 @@ class UIAudioLoop(AudioLoop):
 
                         print(f"\n[You: {transcript_text}]", end="", flush=True)
 
-                    # NEW: Handle output transcription (what Gemini is saying)
+                    # Handle output transcription (what Gemini is saying)
                     if response.server_content.output_transcription:
                         transcript_text = response.server_content.output_transcription.text
                         self.current_gemini_transcript.append(transcript_text)
 
-                        # Send to UI incrementally
                         try:
                             eel.add_gemini_transcription(transcript_text)
                         except Exception as e:
@@ -107,7 +151,7 @@ class UIAudioLoop(AudioLoop):
 
                         print(transcript_text, end="", flush=True)
 
-                # At end of turn, finalize the transcripts
+                # At end of turn, finalize the transcripts and send frame if available
                 if self.current_user_transcript:
                     full_user_text = "".join(self.current_user_transcript)
                     try:
@@ -118,8 +162,19 @@ class UIAudioLoop(AudioLoop):
 
                 if self.current_gemini_transcript:
                     full_gemini_text = "".join(self.current_gemini_transcript)
+
+                    # Send frame data if video mode is active
+                    frame_data = None
+                    if self.video_mode != "none" and self.latest_frame:
+                        frame_data = {
+                            "image": self.latest_frame["data"],  # base64 encoded
+                            "mime_type": self.latest_frame["mime_type"],
+                            "frame_count": self.frame_count,
+                            "duration": round(time.time() - self.turn_start_time, 1) if self.turn_start_time else 0
+                        }
+
                     try:
-                        eel.finalize_gemini_message(full_gemini_text)
+                        eel.finalize_gemini_message(full_gemini_text, frame_data)
                     except Exception as e:
                         print(f"Failed to finalize Gemini message: {e}")
                     self.current_gemini_transcript = []
