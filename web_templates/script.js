@@ -266,23 +266,39 @@ function finalize_gemini_message(fullText, frameData = null) {
         strong.textContent = 'Gemini:';
         currentGeminiMessage.classList.remove('voice-transcript');
 
-        // Add frame thumbnail if available
+        // Add frame thumbnails if available
         if (frameData) {
             const frameContainer = document.createElement('div');
             frameContainer.className = 'frame-container';
 
-            const img = document.createElement('img');
-            img.src = `data:${frameData.mime_type};base64,${frameData.image}`;
-            img.className = 'captured-frame';
-            img.alt = 'Captured frame';
+            // First frame
+            const firstImg = document.createElement('img');
+            firstImg.src = `data:${frameData.mime_type};base64,${frameData.first_frame}`;
+            firstImg.className = 'captured-frame';
+            firstImg.alt = 'First frame';
+            firstImg.title = 'First frame Gemini saw';
+            frameContainer.appendChild(firstImg);
+
+            // Last frame (if different)
+            if (frameData.last_frame) {
+                const lastImg = document.createElement('img');
+                lastImg.src = `data:${frameData.mime_type};base64,${frameData.last_frame}`;
+                lastImg.className = 'captured-frame';
+                lastImg.alt = 'Last frame';
+                lastImg.title = 'Last frame Gemini saw';
+                frameContainer.appendChild(lastImg);
+            }
 
             const caption = document.createElement('div');
             caption.className = 'frame-caption';
-            caption.textContent = `📷 Captured ${frameData.frame_count} frame${frameData.frame_count !== 1 ? 's' : ''} (${frameData.duration}s)`;
+            const frameWord = frameData.frame_count !== 1 ? 'frames' : 'frame';
+            caption.textContent = `📷 Captured ${frameData.frame_count} ${frameWord} over ${frameData.duration}s`;
 
-            frameContainer.appendChild(img);
             frameContainer.appendChild(caption);
-            currentGeminiMessage.appendChild(frameContainer);
+
+            // Insert at the very beginning (after the strong tag)
+            const strong = currentGeminiMessage.querySelector('strong');
+            strong.insertAdjacentElement('afterend', frameContainer);
         }
 
         currentGeminiMessage = null;

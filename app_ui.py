@@ -221,6 +221,9 @@ class UIAudioLoop:
         # Initial prompt for first narration (full description)
         self.initial_prompt: Optional[str] = initial_prompt
 
+        # Frame tracking for turn
+        self.turn_frames: List[Dict[str, str]] = []  # Frames captured during current turn
+
         # Custom narration prompts (for subsequent delta updates)
         self.narration_prompts: List[str] = narration_prompts or [
             "What changed since your last observation?",
@@ -433,33 +436,26 @@ class UIAudioLoop:
 
         while not self.should_stop:
             msg = await self.out_queue.get()
-
             mime_type = msg.get("mime_type", "")
 
             if "audio" in mime_type:
-                # Audio data - don't log every chunk
                 await self.session.send_realtime_input(
-                    audio=types.Blob(
-                        data=msg["data"],
-                        mime_type=mime_type
-                    )
+                    audio=types.Blob(data=msg["data"], mime_type=mime_type)
                 )
             else:
                 # Video frame
                 image_data = base64.b64decode(msg["data"])
 
+                # Store frame for this turn
+                self.turn_frames.append(msg)
+
                 self.total_frames_sent += 1
-                self.frames_sent_since_narration += 1  # Track frames since last narration
+                self.frames_sent_since_narration += 1
                 debug_log(f"Sending video frame #{self.total_frames_sent} to API", "SENDER")
 
                 await self.session.send_realtime_input(
-                    media=types.Blob(
-                        data=image_data,
-                        mime_type=mime_type
-                    )
+                    media=types.Blob(data=image_data, mime_type=mime_type)
                 )
-
-        debug_log("Realtime sender task ended", "SENDER")
 
     # ========================================================================
     # RESPONSE RECEIVER TASK
@@ -537,17 +533,22 @@ class UIAudioLoop:
 
                     frame_data: Optional[Dict[str, Any]] = None
 
-                    if self.video_mode != "none" and self.latest_frame:
+                    if self.video_mode != "none" and self.turn_frames:
+                        # Get first and last frames from this turn
+                        first_frame = self.turn_frames[0]
+                        last_frame = self.turn_frames[-1] if len(self.turn_frames) > 1 else None
+
                         turn_duration = time.time() - self.turn_start_time if self.turn_start_time else 0
 
                         frame_data = {
-                            "image": self.latest_frame["data"],
-                            "mime_type": self.latest_frame["mime_type"],
-                            "frame_count": max(1, self.frame_count),
+                            "first_frame": first_frame["data"],
+                            "last_frame": last_frame["data"] if last_frame else None,
+                            "mime_type": first_frame["mime_type"],
+                            "frame_count": len(self.turn_frames),
                             "duration": round(turn_duration, 1)
                         }
 
-                        debug_log(f"Attaching {self.frame_count} frames to response", "RECEIVER")
+                        debug_log(f"Attaching {len(self.turn_frames)} frames to response", "RECEIVER")
 
                     try:
                         eel.finalize_gemini_message(full_gemini_text, frame_data)
@@ -555,6 +556,7 @@ class UIAudioLoop:
                         print(f"Failed to finalize Gemini message: {e}")
 
                     self.current_gemini_transcript = []
+                    self.turn_frames = []  # Clear frames for next turn
 
                 # Clear audio queue
                 queue_size = self.audio_in_queue.qsize()
