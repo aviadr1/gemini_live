@@ -117,7 +117,7 @@ if sys.version_info < (3, 11, 0):
 # ============================================================================
 
 # Gemini model optimized for Live API
-MODEL = "models/gemini-2.0-flash-live-001"
+MODEL = "gemini-2.5-flash-native-audio-preview-09-2025"
 
 # Default video mode
 DEFAULT_MODE = "camera"

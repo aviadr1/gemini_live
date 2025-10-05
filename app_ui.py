@@ -26,7 +26,7 @@ import eel
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from google.genai.types import LiveConnectConfig, Modality
+from google.genai.types import LiveConnectConfig, Modality, TurnCoverage
 
 # Import shared utilities
 from utils import (
@@ -66,7 +66,7 @@ eel.init('web')
 DEFAULT_MODE = "camera"
 DEFAULT_FPS = 1.0
 DEFAULT_NARRATION_INTERVAL = 5.0  # seconds between narration prompts
-MODEL = "models/gemini-2.0-flash-live-001"
+MODEL = "gemini-2.5-flash-native-audio-preview-09-2025"
 
 # Predefined system prompts with matching narration prompts
 SYSTEM_PROMPTS = {
@@ -81,11 +81,12 @@ Describe:
 - Movement: any motion or changes happening in the scene
 - Text: read any visible text, signs, or written content
 
-Be objective and descriptive. Prioritize the most relevant information first. Use clear, spatial language (left, right, center, foreground, background). Avoid assumptions or interpretations - describe only what you can see.""",
+Be objective and descriptive. Prioritize the most relevant information first. Use clear, spatial language (left, right, center, foreground, background). Avoid assumptions or interpretations - describe only what you can see.
+""",
         "narration_prompts": [
-            "Describe everything you see in detail.",
-            "What's in the scene right now? Describe all visible elements.",
-            "Provide a comprehensive description of the current view."
+            "What has changed since the last description? Describe any new elements, movements, or differences.",
+            "Compare the current view to what you saw before. What's different?",
+            "Describe any changes in the scene - what moved, appeared, or disappeared?"
         ]
     },
 
@@ -136,7 +137,8 @@ def create_live_config(system_instruction: Optional[str] = None) -> LiveConnectC
     config_dict = {
         "response_modalities": [Modality.AUDIO],
         "input_audio_transcription": types.AudioTranscriptionConfig(),
-        "output_audio_transcription": types.AudioTranscriptionConfig()
+        "output_audio_transcription": types.AudioTranscriptionConfig(),
+        "realtime_input_config": types.RealtimeInputConfig(turn_coverage=TurnCoverage.TURN_INCLUDES_ALL_INPUT)
     }
 
     if system_instruction:
