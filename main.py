@@ -113,8 +113,12 @@ client = genai.Client(http_options={"api_version": "v1beta"})
 # Configuration for the Live API session
 # response_modalities determines the format of model's responses
 # ["AUDIO"] means the model will respond with spoken audio
-# Could also be ["TEXT"] for text-only responses
-CONFIG = LiveConnectConfig(response_modalities= [Modality.AUDIO])
+# input_audio_transcription enables transcription of user's voice input
+CONFIG = types.LiveConnectConfig(
+    response_modalities=[Modality.AUDIO],
+    input_audio_transcription=types.AudioTranscriptionConfig(),  # Already there - transcribes YOUR voice
+    output_audio_transcription=types.AudioTranscriptionConfig()  # transcribes Gemini's voice
+)
 
 # Initialize PyAudio for handling audio input/output
 pya = pyaudio.PyAudio()
@@ -456,6 +460,7 @@ class AudioLoop:
         3. This allows immediate response to user's new input
 
         This task reads from the websocket and writes PCM chunks to the output queue.
+        Now includes transcription handling for both input and output audio.
         """
         while True:
             # Get the next "turn" from Gemini
@@ -464,23 +469,27 @@ class AudioLoop:
 
             # Iterate through all response chunks in this turn
             async for response in turn:
-                # If there's audio data, queue it for playback
+                # Handle audio data (to be played)
                 if data := response.data:
                     self.audio_in_queue.put_nowait(data)
                     continue
-                # If there's text (transcript), print it
+
+                # Handle text responses (for TEXT mode responses)
                 if text := response.text:
                     print(text, end="")
+                    continue
 
-            # **CRITICAL INTERRUPTION HANDLING**:
-            # If you interrupt the model, it sends a turn_complete.
-            # For interruptions to work, we need to stop playback.
-            # So empty out the audio queue because it may have loaded
-            # much more audio than has played yet.
-            #
-            # Without this, if you interrupt Gemini mid-sentence,
-            # it would keep playing the rest of that sentence even
-            # though you've already started talking about something else.
+                # NEW: Handle input transcription (what YOU said)
+                if response.server_content.input_transcription:
+                    transcript = response.server_content.input_transcription.text
+                    print(f"\n[You said: {transcript}]", end="", flush=True)
+
+                # NEW: Handle output transcription (what Gemini is saying in audio)
+                if response.server_content.output_transcription:
+                    transcript = response.server_content.output_transcription.text
+                    print(transcript, end="", flush=True)
+
+            # Clear audio queue on interruption
             while not self.audio_in_queue.empty():
                 self.audio_in_queue.get_nowait()
 

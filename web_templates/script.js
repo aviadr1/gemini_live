@@ -1,11 +1,12 @@
 let isRunning = false;
+let currentGeminiMessage = null;
+let currentUserTranscript = null;
 
 async function startSession() {
     const mode = document.getElementById('video-mode').value;
     const result = await eel.start_session(mode)();
 
     if (result.status === 'success') {
-        // Wait a moment for the session to actually start
         setTimeout(() => {
             isRunning = true;
             updateUIState(true);
@@ -19,9 +20,7 @@ async function stopSession() {
     const result = await eel.stop_session()();
 
     if (result.status === 'success') {
-        // Don't immediately change UI state - wait for the status update from Python
-        // The Python side will call update_status("Disconnected") when actually stopped
-        document.getElementById('stop-btn').disabled = true; // Just disable the button to prevent multiple clicks
+        document.getElementById('stop-btn').disabled = true;
     } else {
         alert('Error: ' + result.message);
     }
@@ -50,7 +49,6 @@ function updateUIState(running) {
     document.getElementById('video-mode').disabled = running;
 }
 
-// Exposed function for Python to call
 eel.expose(update_status);
 function update_status(status) {
     const statusEl = document.getElementById('status');
@@ -60,28 +58,106 @@ function update_status(status) {
     if (status.includes('Connected')) {
         statusEl.classList.add('connected');
         isRunning = true;
-        updateUIState(true);  // THIS IS MISSING
+        updateUIState(true);
     } else if (status.includes('Error')) {
         statusEl.classList.add('error');
         isRunning = false;
-        updateUIState(false);  // THIS IS MISSING
-    } else if (status.includes('Disconnected')) {  // THIS WHOLE BLOCK IS MISSING
-        // Session has actually stopped
+        updateUIState(false);
+    } else if (status.includes('Disconnected')) {
         isRunning = false;
         updateUIState(false);
+        currentGeminiMessage = null;
+        currentUserTranscript = null;
     }
 }
 
-// Exposed function for Python to call
-eel.expose(update_transcript);
-function update_transcript(text) {
+// For typed text messages
+eel.expose(add_message);
+function add_message(sender, text) {
     const transcript = document.getElementById('transcript');
-    transcript.textContent += text;
-    // Auto-scroll to bottom
+
+    if (sender === 'user') {
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'message user-message';
+        messageDiv.innerHTML = `<strong>You:</strong> <span class="message-text">${escapeHtml(text)}</span>`;
+        transcript.appendChild(messageDiv);
+        currentGeminiMessage = null;
+    } else if (sender === 'gemini') {
+        if (!currentGeminiMessage) {
+            currentGeminiMessage = document.createElement('div');
+            currentGeminiMessage.className = 'message gemini-message';
+            currentGeminiMessage.innerHTML = '<strong>Gemini:</strong> <span class="message-text"></span>';
+            transcript.appendChild(currentGeminiMessage);
+        }
+        const textSpan = currentGeminiMessage.querySelector('.message-text');
+        textSpan.textContent += text;
+    }
+
     transcript.scrollTop = transcript.scrollHeight;
 }
 
-// Allow Enter key to send message
+// User voice transcription (incremental)
+eel.expose(add_user_transcription);
+function add_user_transcription(text) {
+    const transcript = document.getElementById('transcript');
+
+    if (!currentUserTranscript) {
+        currentUserTranscript = document.createElement('div');
+        currentUserTranscript.className = 'message user-message voice-transcript';
+        currentUserTranscript.innerHTML = '<strong>🎤 You:</strong> <span class="message-text"></span>';
+        transcript.appendChild(currentUserTranscript);
+    }
+
+    const textSpan = currentUserTranscript.querySelector('.message-text');
+    textSpan.textContent += text;
+    transcript.scrollTop = transcript.scrollHeight;
+}
+
+// Gemini voice transcription (incremental)
+eel.expose(add_gemini_transcription);
+function add_gemini_transcription(text) {
+    const transcript = document.getElementById('transcript');
+
+    if (!currentGeminiMessage) {
+        currentGeminiMessage = document.createElement('div');
+        currentGeminiMessage.className = 'message gemini-message voice-transcript';
+        currentGeminiMessage.innerHTML = '<strong>🔊 Gemini:</strong> <span class="message-text"></span>';
+        transcript.appendChild(currentGeminiMessage);
+    }
+
+    const textSpan = currentGeminiMessage.querySelector('.message-text');
+    textSpan.textContent += text;
+    transcript.scrollTop = transcript.scrollHeight;
+}
+
+// Finalize user voice message
+eel.expose(finalize_user_message);
+function finalize_user_message(fullText) {
+    if (currentUserTranscript) {
+        const strong = currentUserTranscript.querySelector('strong');
+        strong.textContent = 'You:';
+        currentUserTranscript.classList.remove('voice-transcript');
+        currentUserTranscript = null;
+    }
+}
+
+// Finalize Gemini voice message
+eel.expose(finalize_gemini_message);
+function finalize_gemini_message(fullText) {
+    if (currentGeminiMessage) {
+        const strong = currentGeminiMessage.querySelector('strong');
+        strong.textContent = 'Gemini:';
+        currentGeminiMessage.classList.remove('voice-transcript');
+        currentGeminiMessage = null;
+    }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     document.getElementById('message-input').addEventListener('keypress', function(e) {
         if (e.key === 'Enter') {
