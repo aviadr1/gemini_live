@@ -288,10 +288,8 @@ def get_status():
 
 def main():
     """Main entry point."""
-    web_dir = Path(__file__).parent / 'web'
-    if not web_dir.exists():
-        print("Creating web directory and files...")
-        create_web_files()
+    # Sync web files (creates or updates as needed)
+    sync_web_files()
 
     try:
         eel.start('index.html', size=(1000, 800), mode='default')
@@ -300,8 +298,11 @@ def main():
         sys.exit(0)
 
 
-def create_web_files():
-    """Create web UI files."""
+def sync_web_files():
+    """
+    Sync web files from templates, updating only if template is newer.
+    Creates web directory if it doesn't exist.
+    """
     web_dir = Path(__file__).parent / 'web'
     web_dir.mkdir(exist_ok=True)
 
@@ -311,6 +312,7 @@ def create_web_files():
         print(f"Error: web_templates directory not found at {templates_dir}")
         sys.exit(1)
 
+    updated_files = []
     for filename in ['index.html', 'style.css', 'script.js']:
         src = templates_dir / filename
         dst = web_dir / filename
@@ -319,9 +321,23 @@ def create_web_files():
             print(f"Error: {filename} not found in web_templates/")
             sys.exit(1)
 
-        dst.write_text(src.read_text())
+        # Check if we need to update
+        should_copy = False
+        if not dst.exists():
+            should_copy = True
+            reason = "new file"
+        elif src.stat().st_mtime > dst.stat().st_mtime:
+            should_copy = True
+            reason = "template is newer"
 
-    print(f"✓ Created web files in {web_dir}")
+        if should_copy:
+            dst.write_text(src.read_text())
+            updated_files.append(f"{filename} ({reason})")
+
+    if updated_files:
+        print(f"✓ Updated web files: {', '.join(updated_files)}")
+    else:
+        print("✓ Web files are up to date")
 
 
 if __name__ == "__main__":
