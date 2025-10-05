@@ -76,6 +76,7 @@ import argparse
 
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 from google.genai.live import AsyncSession
 
 # Load environment variables from .env file (including GOOGLE_API_KEY)
@@ -166,12 +167,17 @@ class AudioLoop:
 
         This runs in a separate task and continuously waits for user input.
         When user types a message and presses Enter, it sends that message
-        to Gemini and marks it as end_of_turn=True.
+        to Gemini and marks it as turn_complete=True.
 
         **Turn Management**:
-        - end_of_turn=True signals that the user has completed their input
+        - turn_complete=True signals that the user has completed their input
         - This triggers Gemini to start processing and generating a response
         - Without this flag, Gemini waits for more input
+
+        **API Migration Note**:
+        - Uses send_client_content() instead of deprecated send()
+        - send_client_content adds messages to model context in order
+        - Provides explicit turn boundaries for structured conversation
 
         Type 'q' to quit the conversation.
         """
@@ -185,11 +191,16 @@ class AudioLoop:
             if text.lower() == "q":
                 break
 
-            # Send text to Gemini Live API
-            # - input: The text message to send
-            # - end_of_turn: Signals that user has finished their turn
-            #   This tells Gemini: "I'm done talking, your turn to respond"
-            await self.session.send(input=text or ".", end_of_turn=True)
+            # **NEW API METHOD**: send_client_content
+            # This replaces the deprecated session.send(input=text, end_of_turn=True)
+            #
+            # send_client_content is used for structured turns with explicit completion
+            # - turns: Content with role and parts (text/inline data)
+            # - turn_complete: Signals end of user's turn (triggers model response)
+            await self.session.send_client_content(
+                turns={"role": "user", "parts": [{"text": text or "."}]},
+                turn_complete=True
+            )
 
     def _get_frame(self, cap: cv2.VideoCapture) -> Optional[Dict[str, str]]:
         """
@@ -308,25 +319,61 @@ class AudioLoop:
 
     async def send_realtime(self) -> None:
         """
-        Send queued data (audio/video/text) to Gemini in real-time.
+        Send queued data (audio/video/images) to Gemini in real-time.
 
         This task continuously pulls data from out_queue and sends it
-        to the Gemini Live API session.
+        to the Gemini Live API session using the appropriate method.
 
         **Real-time Streaming**:
         - Audio chunks are sent as soon as they're captured (~every 64ms)
-        - Video frames are sent every 1 second
-        - Text messages are sent when user presses Enter
+        - Video/image frames are sent every 1 second
+        - Uses send_realtime_input for continuous streaming
 
-        **No Turn Boundaries**: This method does NOT set end_of_turn,
-        so Gemini receives continuous streaming data. The model uses
-        Voice Activity Detection (VAD) to determine when user stops speaking.
+        **API Migration Note**:
+        - Uses send_realtime_input() instead of deprecated send()
+        - send_realtime_input is optimized for responsiveness over ordering
+        - Automatically handles Voice Activity Detection (VAD)
+        - Does NOT set explicit end_of_turn - relies on VAD for audio
+
+        **How it determines the right method**:
+        - Audio data (mime_type contains "audio/pcm"): uses audio parameter
+        - Image/Video data (other mime types): uses media parameter
         """
         while True:
             # Wait for data to appear in queue
             msg = await self.out_queue.get()
-            # Send immediately to Gemini
-            await self.session.send(input=msg)
+
+            # **NEW API METHOD**: send_realtime_input
+            # This replaces the deprecated session.send(input=msg)
+            #
+            # send_realtime_input handles continuous streaming without explicit turns
+            # - Optimized for low-latency, real-time data
+            # - Can be sent without interrupting model generation
+            # - Uses VAD to detect end of turn for audio
+
+            # Determine if this is audio or media (image/video) based on MIME type
+            mime_type = msg.get("mime_type", "")
+
+            if "audio" in mime_type:
+                # For audio: use the audio parameter
+                # Audio data is raw PCM bytes at 16kHz
+                await self.session.send_realtime_input(
+                    audio=types.Blob(
+                        data=msg["data"],
+                        mime_type=mime_type
+                    )
+                )
+            else:
+                # For images/video: use the media parameter
+                # Data is base64-encoded JPEG/PNG
+                # Need to decode base64 back to bytes for Blob
+                image_data = base64.b64decode(msg["data"])
+                await self.session.send_realtime_input(
+                    media=types.Blob(
+                        data=image_data,
+                        mime_type=mime_type
+                    )
+                )
 
     async def listen_audio(self) -> None:
         """
