@@ -184,28 +184,34 @@ class AudioLoop:
         Type 'q' to quit the conversation.
         """
         while True:
-            # Use asyncio.to_thread to prevent blocking the event loop
-            # input() is a blocking call, so we run it in a separate thread
-            text = await asyncio.to_thread(
-                input,
-                "message > ",
-            )
-            if text.lower() == "q":
-                break
+            try:
+                # Use asyncio.to_thread to prevent blocking the event loop
+                # input() is a blocking call, so we run it in a separate thread
+                text = await asyncio.to_thread(
+                    input,
+                    "message > ",
+                )
+                if text.lower() == "q":
+                    break
 
-            # **NEW API METHOD**: send_client_content
-            # This replaces the deprecated session.send(input=text, end_of_turn=True)
-            #
-            # send_client_content is used for structured turns with explicit completion
-            # - turns: Content object with role and parts (text/inline data)
-            # - turn_complete: Signals end of user's turn (triggers model response)
-            await self.session.send_client_content(
-                turns=types.Content(
-                    role="user",
-                    parts=[types.Part(text=text or ".")]
-                ),
-                turn_complete=True
-            )
+                # **NEW API METHOD**: send_client_content
+                # This replaces the deprecated session.send(input=text, end_of_turn=True)
+                #
+                # send_client_content is used for structured turns with explicit completion
+                # - turns: Content object with role and parts (text/inline data)
+                # - turn_complete: Signals end of user's turn (triggers model response)
+                await self.session.send_client_content(
+                    turns=types.Content(
+                        role="user",
+                        parts=[types.Part(text=text or ".")]
+                    ),
+                    turn_complete=True
+                )
+            except (KeyboardInterrupt, EOFError, UnicodeDecodeError):
+                # Handle Ctrl+C, Ctrl+D, or input encoding errors gracefully
+                # Break out of the loop to trigger clean shutdown
+                print("\nExiting...")
+                break
 
     def _get_frame(self, cap: cv2.VideoCapture) -> Optional[Dict[str, str]]:
         """
