@@ -1,9 +1,57 @@
 let isRunning = false;
 let currentGeminiMessage = null;
 let currentUserTranscript = null;
+let systemPrompts = {};
+
+// Load system prompts when page loads
+async function loadSystemPrompts() {
+    systemPrompts = await eel.get_system_prompts()();
+}
+
+// Update prompt display when selection changes
+function updatePromptDisplay() {
+    const select = document.getElementById('system-prompt-select');
+    const selectedKey = select.value;
+
+    const instructionDisplay = document.getElementById('system-instruction-display');
+    const instructionText = document.getElementById('system-instruction-text');
+    const promptsDisplay = document.getElementById('narration-prompts-display');
+    const promptsList = document.getElementById('narration-prompts-list');
+    const customSection = document.getElementById('custom-prompt-section');
+
+    if (selectedKey === 'custom') {
+        // Show custom inputs
+        instructionDisplay.style.display = 'none';
+        promptsDisplay.style.display = 'none';
+        customSection.style.display = 'block';
+    } else if (selectedKey && systemPrompts[selectedKey]) {
+        // Show predefined prompt
+        const prompt = systemPrompts[selectedKey];
+
+        instructionText.textContent = prompt.system_instruction;
+        instructionDisplay.style.display = 'block';
+
+        promptsList.innerHTML = '';
+        prompt.narration_prompts.forEach(p => {
+            const li = document.createElement('li');
+            li.textContent = p;
+            promptsList.appendChild(li);
+        });
+        promptsDisplay.style.display = 'block';
+
+        customSection.style.display = 'none';
+    } else {
+        // Hide all
+        instructionDisplay.style.display = 'none';
+        promptsDisplay.style.display = 'none';
+        customSection.style.display = 'none';
+    }
+}
 
 // Update FPS display when slider changes
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
+    await loadSystemPrompts();
+
     const fpsSlider = document.getElementById('fps-slider');
     const fpsValue = document.getElementById('fps-value');
     const narrationMode = document.getElementById('narration-mode');
@@ -11,6 +59,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const intervalSlider = document.getElementById('interval-slider');
     const intervalValue = document.getElementById('interval-value');
     const messageInput = document.getElementById('message-input');
+    const systemPromptSelect = document.getElementById('system-prompt-select');
 
     // FPS slider
     fpsSlider.addEventListener('input', function() {
@@ -27,6 +76,9 @@ document.addEventListener('DOMContentLoaded', function() {
         intervalValue.textContent = this.value;
     });
 
+    // System prompt selection
+    systemPromptSelect.addEventListener('change', updatePromptDisplay);
+
     // Enter key to send message
     messageInput.addEventListener('keypress', function(e) {
         if (e.key === 'Enter') {
@@ -40,8 +92,30 @@ async function startSession() {
     const fps = parseFloat(document.getElementById('fps-slider').value);
     const narrationMode = document.getElementById('narration-mode').checked;
     const narrationInterval = parseInt(document.getElementById('interval-slider').value);
+    const systemPromptKey = document.getElementById('system-prompt-select').value;
 
-    const result = await eel.start_session(mode, fps, narrationMode, narrationInterval)();
+    let customSystemPrompt = '';
+    let customNarrationPrompts = '';
+
+    if (systemPromptKey === 'custom') {
+        customSystemPrompt = document.getElementById('custom-system-instruction').value;
+        customNarrationPrompts = document.getElementById('custom-narration-prompts').value;
+
+        if (!customSystemPrompt) {
+            alert('Please enter a custom system instruction or select a predefined prompt.');
+            return;
+        }
+    }
+
+    const result = await eel.start_session(
+        mode,
+        fps,
+        narrationMode,
+        narrationInterval,
+        systemPromptKey === 'custom' ? '' : systemPromptKey,
+        customSystemPrompt,
+        customNarrationPrompts
+    )();
 
     if (result.status === 'success') {
         setTimeout(() => {
@@ -87,6 +161,9 @@ function updateUIState(running) {
     document.getElementById('fps-slider').disabled = running;
     document.getElementById('narration-mode').disabled = running;
     document.getElementById('interval-slider').disabled = running;
+    document.getElementById('system-prompt-select').disabled = running;
+    document.getElementById('custom-system-instruction').disabled = running;
+    document.getElementById('custom-narration-prompts').disabled = running;
 }
 
 eel.expose(update_status);

@@ -16,6 +16,43 @@
         <div class="controls">
             <div class="control-row">
                 <div class="control-group">
+                    <label>System Prompt:</label>
+                    <select id="system-prompt-select">
+                        <option value="">None (Default)</option>
+                        <option value="video_describer">Video Describer for Accessibility</option>
+                        <option value="expression_analyzer">Facial Expression Analyzer</option>
+                        <option value="yoga_instructor">Supportive Yoga Instructor</option>
+                        <option value="custom">✏️ Custom Prompt</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- System Instruction Display -->
+            <div id="system-instruction-display" class="prompt-display" style="display: none;">
+                <label>System Instruction:</label>
+                <div class="prompt-text" id="system-instruction-text"></div>
+            </div>
+
+            <!-- Narration Prompts Display -->
+            <div id="narration-prompts-display" class="prompt-display" style="display: none;">
+                <label>Narration Prompts (will cycle through these):</label>
+                <ul id="narration-prompts-list" class="prompt-list"></ul>
+            </div>
+
+            <!-- Custom Prompt Inputs -->
+            <div id="custom-prompt-section" style="display: none;">
+                <div class="control-group">
+                    <label>Custom System Instruction:</label>
+                    <textarea id="custom-system-instruction" rows="6" placeholder="Enter your custom system instruction here..."></textarea>
+                </div>
+                <div class="control-group">
+                    <label>Custom Narration Prompts (one per line):</label>
+                    <textarea id="custom-narration-prompts" rows="4" placeholder="What do you see?&#10;Describe the current activity.&#10;Provide feedback."></textarea>
+                </div>
+            </div>
+
+            <div class="control-row">
+                <div class="control-group">
                     <label>Video Mode:</label>
                     <select id="video-mode">
                         <option value="camera">📹 Camera</option>
