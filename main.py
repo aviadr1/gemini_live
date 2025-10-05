@@ -71,6 +71,7 @@ import cv2
 import pyaudio
 import PIL.Image
 import mss
+import mss.tools
 
 import argparse
 
