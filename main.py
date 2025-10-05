@@ -57,321 +57,253 @@ The default is "camera". To share your screen run:
 ```
 python Get_started_LiveAPI.py --mode screen
 ```
+Gemini Live API - Console Application
+
+WHAT THIS APP DOES:
+A command-line interface for real-time conversations with Gemini using:
+- Voice input (your microphone)
+- Voice output (your speakers)
+- Optional video input (camera or screen)
+- Text input (keyboard)
+- Real-time transcription of all audio
+
+USAGE:
+    python main.py                    # Camera mode (default)
+    python main.py --mode screen      # Screen share mode
+    python main.py --mode none        # Audio only mode
+
+REQUIREMENTS:
+- GOOGLE_API_KEY environment variable
+- Headphones (to prevent echo/feedback)
+- Microphone and speakers
+- Optional: Webcam for video mode
 """
 
 import asyncio
-import base64
-import io
-import os
+import argparse
 import sys
 import traceback
-from typing import Optional, Dict, Any
+from typing import Optional
 
-import cv2
 import pyaudio
-import PIL.Image
-import mss
-import mss.tools
-
-import argparse
-
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from google.genai.live import AsyncSession
 from google.genai.types import LiveConnectConfig, Modality
 
-# Load environment variables from .env file (including GOOGLE_API_KEY)
+# Import shared utilities
+from utils import (
+    capture_camera_frame,
+    capture_screen_frame,
+    FORMAT,
+    CHANNELS,
+    SEND_SAMPLE_RATE,
+    RECEIVE_SAMPLE_RATE,
+    CHUNK_SIZE
+)
+
+# Load environment variables (.env file)
 load_dotenv()
 
-# Python 3.11+ has TaskGroup built-in, but older versions need backports
+# Python 3.11+ has TaskGroup built-in
 if sys.version_info < (3, 11, 0):
     import taskgroup, exceptiongroup
 
     asyncio.TaskGroup = taskgroup.TaskGroup
     asyncio.ExceptionGroup = exceptiongroup.ExceptionGroup
 
-# Audio format constants for PyAudio
-# These match the required format for Gemini Live API
-FORMAT = pyaudio.paInt16  # 16-bit PCM audio format
-CHANNELS = 1  # Mono audio (single channel)
-SEND_SAMPLE_RATE = 16000  # Input audio: 16kHz (required by Live API)
-RECEIVE_SAMPLE_RATE = 24000  # Output audio: 24kHz (Live API always outputs at this rate)
-CHUNK_SIZE = 1024  # Number of audio frames per buffer (affects latency)
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-# Gemini model to use - this is the Live API optimized model
-# "flash-live" models support real-time bidirectional streaming
+# Gemini model optimized for Live API
 MODEL = "models/gemini-2.0-flash-live-001"
 
-# Default video mode - can be "camera", "screen", or "none"
+# Default video mode
 DEFAULT_MODE = "camera"
 
-# Initialize the Gemini client with API version
-# The client handles authentication using GOOGLE_API_KEY environment variable
-client = genai.Client(http_options={"api_version": "v1beta"})
-
-# Configuration for the Live API session
-# response_modalities determines the format of model's responses
-# ["AUDIO"] means the model will respond with spoken audio
-# input_audio_transcription enables transcription of user's voice input
+# Live API configuration
 CONFIG = types.LiveConnectConfig(
     response_modalities=[Modality.AUDIO],
-    input_audio_transcription=types.AudioTranscriptionConfig(),  # Already there - transcribes YOUR voice
-    output_audio_transcription=types.AudioTranscriptionConfig()  # transcribes Gemini's voice
+    input_audio_transcription=types.AudioTranscriptionConfig(),
+    output_audio_transcription=types.AudioTranscriptionConfig()
 )
 
-# Initialize PyAudio for handling audio input/output
+# Initialize Gemini client
+client = genai.Client(http_options={"api_version": "v1beta"})
+
+# Initialize PyAudio
 pya = pyaudio.PyAudio()
 
 
+# ============================================================================
+# MAIN AUDIO LOOP CLASS
+# ============================================================================
+
 class AudioLoop:
     """
-    Main class that manages the bidirectional audio/video streaming with Gemini Live API.
+    Manages real-time bidirectional communication with Gemini Live API.
 
-    This class orchestrates multiple concurrent tasks:
-    1. Listening to microphone input (user speaking)
-    2. Capturing video frames (from camera or screen)
-    3. Sending audio/video to Gemini API
-    4. Receiving audio responses from Gemini API
-    5. Playing audio responses through speakers
-    6. Accepting text input from console
+    ARCHITECTURE:
+    Runs 6 concurrent tasks:
+    1. send_text() - Accept keyboard input
+    2. send_realtime() - Send queued data to Gemini
+    3. listen_audio() - Capture microphone
+    4. get_frames() or get_screen() - Capture video (optional)
+    5. receive_audio() - Receive Gemini responses
+    6. play_audio() - Play audio through speakers
 
-    The Live API uses a "turn-based" conversation model where:
-    - User provides input (audio, video, or text)
-    - Model processes and generates a response
-    - User can interrupt the model at any time by speaking
+    COMMUNICATION:
+    Tasks communicate via asyncio Queues:
+    - out_queue: Data going TO Gemini (audio, video, images)
+    - audio_in_queue: Audio coming FROM Gemini (to be played)
     """
 
     def __init__(self, video_mode: str = DEFAULT_MODE) -> None:
         """
-        Initialize the AudioLoop with specified video mode.
+        Initialize the audio loop.
 
         Args:
-            video_mode: One of "camera", "screen", or "none"
-                       - "camera": Captures video from webcam
-                       - "screen": Captures screen content
-                       - "none": Audio-only mode
+            video_mode: "camera", "screen", or "none"
         """
-        self.video_mode = video_mode
+        self.video_mode: str = video_mode
 
-        # Queues for managing data flow between tasks
-        # These enable asynchronous communication between different parts of the system
-        self.audio_in_queue: Optional[asyncio.Queue] = None  # Queue for audio coming FROM Gemini (to be played)
-        self.out_queue: Optional[asyncio.Queue] = None  # Queue for data going TO Gemini (audio/video/text)
+        # Queues for inter-task communication
+        self.audio_in_queue: Optional[asyncio.Queue] = None
+        self.out_queue: Optional[asyncio.Queue] = None
 
-        # The Live API session object - represents the WebSocket connection
-        self.session: Optional[AsyncSession] = None
+        # Live API session (WebSocket connection)
+        self.session: Optional[asyncio.Task] = None
 
-        # Task references (not actively used but kept for potential cleanup)
-        self.send_text_task: Optional[asyncio.Task] = None
-        self.receive_audio_task: Optional[asyncio.Task] = None
-        self.play_audio_task: Optional[asyncio.Task] = None
+        # Audio stream (for cleanup)
+        self.audio_stream: Optional[pyaudio.Stream] = None
+
+    # ========================================================================
+    # TEXT INPUT TASK
+    # ========================================================================
 
     async def send_text(self) -> None:
         """
-        Console input task - allows user to type messages to Gemini.
+        Accept keyboard input and send to Gemini.
 
-        This runs in a separate task and continuously waits for user input.
-        When user types a message and presses Enter, it sends that message
-        to Gemini and marks it as turn_complete=True.
+        STRUCTURED TURNS:
+        Uses send_client_content() which creates explicit turn boundaries.
+        This is different from send_realtime_input() which streams continuously.
 
-        **Turn Management**:
-        - turn_complete=True signals that the user has completed their input
-        - This triggers Gemini to start processing and generating a response
-        - Without this flag, Gemini waits for more input
+        TURN COMPLETION:
+        Setting turn_complete=True signals to Gemini:
+        "I'm done with my input, please respond now"
 
-        **API Migration Note**:
-        - Uses send_client_content() instead of deprecated send()
-        - send_client_content adds messages to model context in order
-        - Provides explicit turn boundaries for structured conversation
-
+        EXIT:
         Type 'q' to quit the conversation.
         """
         while True:
             try:
-                # Use asyncio.to_thread to prevent blocking the event loop
-                # input() is a blocking call, so we run it in a separate thread
-                text = await asyncio.to_thread(
-                    input,
-                    "message > ",
-                )
+                # Read input (blocking, so use thread)
+                text = await asyncio.to_thread(input, "message > ")
+
                 if text.lower() == "q":
+                    # User wants to exit
                     break
 
-                # **NEW API METHOD**: send_client_content
-                # This replaces the deprecated session.send(input=text, end_of_turn=True)
-                #
-                # send_client_content is used for structured turns with explicit completion
-                # - turns: Content object with role and parts (text/inline data)
-                # - turn_complete: Signals end of user's turn (triggers model response)
+                # Send to Gemini as a complete turn
                 await self.session.send_client_content(
                     turns=types.Content(
                         role="user",
                         parts=[types.Part(text=text or ".")]
                     ),
-                    turn_complete=True
+                    turn_complete=True  # Triggers response
                 )
+
             except (KeyboardInterrupt, EOFError, UnicodeDecodeError):
-                # Handle Ctrl+C, Ctrl+D, or input encoding errors gracefully
-                # Break out of the loop to trigger clean shutdown
                 print("\nExiting...")
                 break
 
-    def _get_frame(self, cap: cv2.VideoCapture) -> Optional[Dict[str, str]]:
-        """
-        Capture a single frame from the camera and prepare it for Gemini.
-
-        Args:
-            cap: OpenCV VideoCapture object for the camera
-
-        Returns:
-            Dictionary with MIME type and base64-encoded JPEG data,
-            or None if frame capture failed
-
-        **Frame Processing**:
-        1. Capture raw frame from camera
-        2. Convert BGR (OpenCV default) to RGB (expected by Gemini)
-        3. Resize to max 1024x1024 (to reduce bandwidth)
-        4. Encode as JPEG
-        5. Base64 encode for transmission
-        """
-        # Read the frame from camera
-        ret, frame = cap.read()
-        # Check if the frame was read successfully
-        if not ret:
-            return None
-        # Fix: Convert BGR to RGB color space
-        # OpenCV captures in BGR but PIL expects RGB format
-        # This prevents the blue tint in the video feed
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = PIL.Image.fromarray(frame_rgb)  # Now using RGB frame
-        img.thumbnail((1024, 1024))
-
-        image_io = io.BytesIO()
-        img.save(image_io, format="jpeg")
-        image_io.seek(0)
-
-        mime_type = "image/jpeg"
-        image_bytes = image_io.read()
-        return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
+    # ========================================================================
+    # VIDEO CAPTURE TASKS
+    # ========================================================================
 
     async def get_frames(self) -> None:
         """
-        Continuously capture frames from camera and send to Gemini.
+        Continuously capture and send camera frames.
 
-        **Video Streaming**:
-        - Captures at ~1 FPS (one frame per second)
-        - Live API processes video at 1 FPS by default
-        - Each frame is added to out_queue to be sent to Gemini
-        - Gemini "sees" the video and can reference it in responses
+        FRAME RATE:
+        Captures at 1 FPS (one frame per second).
+        This matches Gemini's processing rate.
 
-        **Important**: Frame capture blocks for ~1 second, so we use
-        asyncio.to_thread to prevent blocking the audio pipeline.
+        THREADING:
+        Frame capture is blocking, so we use asyncio.to_thread()
+        to prevent blocking the audio pipeline.
         """
-        # This takes about a second, and will block the whole program
-        # causing the audio pipeline to overflow if you don't to_thread it.
-        cap = await asyncio.to_thread(
-            cv2.VideoCapture, 0
-        )  # 0 represents the default camera
+        import cv2
+
+        # Open camera (blocking operation)
+        cap = await asyncio.to_thread(cv2.VideoCapture, 0)
 
         while True:
-            frame = await asyncio.to_thread(self._get_frame, cap)
+            # Capture frame (blocking operation)
+            frame = await asyncio.to_thread(capture_camera_frame, cap)
+
             if frame is None:
+                # Camera failed
                 break
 
-            # Wait 1 second between frames (1 FPS)
+            # Wait 1 second between frames
             await asyncio.sleep(1.0)
 
-            # Add frame to queue to be sent to Gemini
+            # Queue frame to be sent to Gemini
             await self.out_queue.put(frame)
 
-        # Release the VideoCapture object
+        # Cleanup
         cap.release()
-
-    def _get_screen(self) -> Dict[str, str]:
-        """
-        Capture the entire screen and prepare it for Gemini.
-
-        Returns:
-            Dictionary with MIME type and base64-encoded JPEG data
-
-        Similar to _get_frame but captures screen instead of camera.
-        Useful for screen sharing, presentations, or showing Gemini
-        what you're looking at on your computer.
-        """
-        sct = mss.mss()
-        monitor = sct.monitors[0]
-
-        i = sct.grab(monitor)
-
-        mime_type = "image/jpeg"
-        image_bytes = mss.tools.to_png(i.rgb, i.size)
-        img = PIL.Image.open(io.BytesIO(image_bytes))
-
-        image_io = io.BytesIO()
-        img.save(image_io, format="jpeg")
-        image_io.seek(0)
-
-        image_bytes = image_io.read()
-        return {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}
 
     async def get_screen(self) -> None:
         """
-        Continuously capture screen and send to Gemini.
+        Continuously capture and send screen frames.
 
-        Same concept as get_frames() but for screen capture.
-        Allows Gemini to "see" your screen in real-time.
+        Same as get_frames() but captures screen instead of camera.
         """
-
         while True:
-            frame = await asyncio.to_thread(self._get_screen)
+            # Capture screen (blocking operation)
+            frame = await asyncio.to_thread(capture_screen_frame)
+
             if frame is None:
+                # Screen capture failed
                 break
 
+            # Wait 1 second between frames
             await asyncio.sleep(1.0)
 
+            # Queue frame to be sent to Gemini
             await self.out_queue.put(frame)
+
+    # ========================================================================
+    # REALTIME DATA SENDER TASK
+    # ========================================================================
 
     async def send_realtime(self) -> None:
         """
-        Send queued data (audio/video/images) to Gemini in real-time.
+        Send queued data (audio/video) to Gemini in real-time.
 
-        This task continuously pulls data from out_queue and sends it
-        to the Gemini Live API session using the appropriate method.
+        STREAMING VS STRUCTURED:
+        This uses send_realtime_input() which:
+        - Streams data continuously without explicit turns
+        - Optimized for low latency
+        - Relies on VAD (Voice Activity Detection) for turn boundaries
+        - Can be sent while model is generating
 
-        **Real-time Streaming**:
-        - Audio chunks are sent as soon as they're captured (~every 64ms)
-        - Video/image frames are sent every 1 second
-        - Uses send_realtime_input for continuous streaming
-
-        **API Migration Note**:
-        - Uses send_realtime_input() instead of deprecated send()
-        - send_realtime_input is optimized for responsiveness over ordering
-        - Automatically handles Voice Activity Detection (VAD)
-        - Does NOT set explicit end_of_turn - relies on VAD for audio
-
-        **How it determines the right method**:
-        - Audio data (mime_type contains "audio/pcm"): uses audio parameter
-        - Image/Video data (other mime types): uses media parameter
+        AUDIO VS MEDIA:
+        - Audio: Sent via audio parameter (raw PCM bytes)
+        - Images/Video: Sent via media parameter (base64 → bytes)
         """
         while True:
-            # Wait for data to appear in queue
+            # Wait for data in queue
             msg = await self.out_queue.get()
 
-            # **NEW API METHOD**: send_realtime_input
-            # This replaces the deprecated session.send(input=msg)
-            #
-            # send_realtime_input handles continuous streaming without explicit turns
-            # - Optimized for low-latency, real-time data
-            # - Can be sent without interrupting model generation
-            # - Uses VAD to detect end of turn for audio
-
-            # Determine if this is audio or media (image/video) based on MIME type
             mime_type = msg.get("mime_type", "")
 
             if "audio" in mime_type:
-                # For audio: use the audio parameter
-                # Audio data is raw PCM bytes at 16kHz
+                # Audio data (raw PCM from microphone)
                 await self.session.send_realtime_input(
                     audio=types.Blob(
                         data=msg["data"],
@@ -379,10 +311,11 @@ class AudioLoop:
                     )
                 )
             else:
-                # For images/video: use the media parameter
-                # Data is base64-encoded JPEG/PNG
-                # Need to decode base64 back to bytes for Blob
+                # Image/video data (base64 encoded)
+                # Decode base64 back to bytes for Blob
+                import base64
                 image_data = base64.b64decode(msg["data"])
+
                 await self.session.send_realtime_input(
                     media=types.Blob(
                         data=image_data,
@@ -390,29 +323,29 @@ class AudioLoop:
                     )
                 )
 
+    # ========================================================================
+    # AUDIO INPUT TASK
+    # ========================================================================
+
     async def listen_audio(self) -> None:
         """
-        Capture audio from microphone and queue it for sending to Gemini.
+        Capture audio from microphone and queue for sending.
 
-        This task:
-        1. Opens the system's default microphone
-        2. Continuously reads audio chunks (1024 frames at a time)
-        3. Puts raw PCM audio data into out_queue
-        4. Data is then sent to Gemini by send_realtime()
-
-        **Audio Format**:
-        - 16-bit PCM (Pulse Code Modulation) - raw uncompressed audio
-        - 16kHz sample rate (required by Live API for input)
+        AUDIO FORMAT:
+        - 16-bit PCM (raw uncompressed audio)
+        - 16kHz sample rate (required by Live API)
         - Mono (single channel)
+        - 1024 frames per buffer (~64ms latency)
 
-        **Voice Activity Detection**:
-        - Gemini automatically detects when you start/stop speaking
-        - When you stop speaking, Gemini knows your turn is complete
-        - It then starts generating a response
+        VOICE ACTIVITY DETECTION:
+        Gemini automatically detects when you:
+        - Start speaking (turn begins)
+        - Stop speaking (turn ends, triggers response)
         """
-        # Get system's default microphone info
+        # Get default microphone
         mic_info = pya.get_default_input_device_info()
-        # Open audio stream for recording
+
+        # Open audio stream
         self.audio_stream = await asyncio.to_thread(
             pya.open,
             format=FORMAT,
@@ -422,92 +355,91 @@ class AudioLoop:
             input_device_index=mic_info["index"],
             frames_per_buffer=CHUNK_SIZE,
         )
-        # In debug mode, don't raise exception on buffer overflow
-        # (can happen if system is slow)
-        if __debug__:
-            kwargs = {"exception_on_overflow": False}
-        else:
-            kwargs = {}
+
+        # Prevent exceptions on buffer overflow (can happen if system is slow)
+        kwargs = {"exception_on_overflow": False} if __debug__ else {}
+
         while True:
-            # Read audio chunk from microphone (blocking call, so use to_thread)
-            data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
-            # Queue the audio data to be sent to Gemini
-            await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
+            # Read audio chunk (blocking, so use thread)
+            data = await asyncio.to_thread(
+                self.audio_stream.read,
+                CHUNK_SIZE,
+                **kwargs
+            )
+
+            # Queue for sending to Gemini
+            await self.out_queue.put({
+                "data": data,
+                "mime_type": "audio/pcm"
+            })
+
+    # ========================================================================
+    # RESPONSE RECEIVER TASK
+    # ========================================================================
 
     async def receive_audio(self) -> None:
         """
-        Receive responses from Gemini and manage turn completion.
+        Receive and process responses from Gemini.
 
-        This is the CORE task for understanding Gemini's response cycle.
+        TURN STRUCTURE:
+        Each turn contains multiple response chunks:
+        - response.data: Audio bytes (PCM at 24kHz)
+        - response.text: Text content (if TEXT mode)
+        - response.server_content.input_transcription: Your speech as text
+        - response.server_content.output_transcription: Gemini's speech as text
 
-        **How Turns Work**:
-        1. User speaks (audio sent via listen_audio → send_realtime)
-        2. User stops speaking (detected by VAD)
-        3. Gemini starts generating response
-        4. Response arrives as stream of audio chunks
-        5. turn_complete signal indicates Gemini finished its response
-
-        **Response Types**:
-        - response.data: Audio chunk (PCM bytes) to be played
-        - response.text: Transcript of what Gemini is saying
-        - response.server_content.interrupted: User interrupted the model
-        - response.server_content.turn_complete: Model finished its turn
-
-        **Interruption Handling**:
-        When user interrupts (starts speaking while model is talking):
-        1. Gemini sends interrupted=True
-        2. We clear the audio queue (stop playing the rest)
-        3. This allows immediate response to user's new input
-
-        This task reads from the websocket and writes PCM chunks to the output queue.
-        Now includes transcription handling for both input and output audio.
+        INTERRUPTION:
+        When you interrupt (start speaking while Gemini is talking):
+        - Gemini sends turn_complete
+        - We clear the audio queue (stop playing old audio)
+        - Your new input takes priority
         """
         while True:
-            # Get the next "turn" from Gemini
-            # A turn is one complete response from the model
+            # Get next turn
             turn = self.session.receive()
 
-            # Iterate through all response chunks in this turn
+            # Process all response chunks in this turn
             async for response in turn:
-                # Handle audio data (to be played)
+                # Audio to play
                 if data := response.data:
                     self.audio_in_queue.put_nowait(data)
                     continue
 
-                # Handle text responses (for TEXT mode responses)
+                # Text response (TEXT mode only)
                 if text := response.text:
                     print(text, end="")
                     continue
 
-                # NEW: Handle input transcription (what YOU said)
+                # Input transcription (what you said)
                 if response.server_content.input_transcription:
                     transcript = response.server_content.input_transcription.text
-                    print(f"\n[You said: {transcript}]", end="", flush=True)
+                    print(f"\n[You: {transcript}]", end="", flush=True)
 
-                # NEW: Handle output transcription (what Gemini is saying in audio)
+                # Output transcription (what Gemini is saying)
                 if response.server_content.output_transcription:
                     transcript = response.server_content.output_transcription.text
                     print(transcript, end="", flush=True)
 
-            # Clear audio queue on interruption
+            # Turn complete - clear audio queue (handles interruption)
             while not self.audio_in_queue.empty():
                 self.audio_in_queue.get_nowait()
 
+    # ========================================================================
+    # AUDIO OUTPUT TASK
+    # ========================================================================
+
     async def play_audio(self) -> None:
         """
-        Play audio responses from Gemini through speakers.
+        Play audio responses through speakers.
 
-        This task:
-        1. Waits for audio chunks in audio_in_queue
-        2. Plays them through the system's default speakers
-
-        **Audio Playback**:
+        AUDIO FORMAT:
+        - 16-bit PCM (same as input)
         - 24kHz sample rate (Gemini always outputs at this rate)
-        - 16-bit PCM format
-        - Mono audio
+        - Mono (single channel)
 
-        This runs continuously, playing audio as fast as it arrives.
-        The queue ensures smooth playback even if network is choppy.
+        PLAYBACK:
+        Audio chunks are queued and played as fast as they arrive.
+        The queue ensures smooth playback even with network jitter.
         """
         # Open audio stream for playback
         stream = await asyncio.to_thread(
@@ -517,60 +449,52 @@ class AudioLoop:
             rate=RECEIVE_SAMPLE_RATE,
             output=True,
         )
+
         while True:
-            # Wait for audio data from Gemini
+            # Wait for audio from Gemini
             bytestream = await self.audio_in_queue.get()
-            # Play it through speakers (blocking call, so use to_thread)
+
+            # Play through speakers (blocking, so use thread)
             await asyncio.to_thread(stream.write, bytestream)
+
+    # ========================================================================
+    # MAIN RUN METHOD
+    # ========================================================================
 
     async def run(self) -> None:
         """
-        Main entry point that orchestrates all tasks.
+        Main entry point - sets up and runs all tasks.
 
-        **Task Architecture**:
-        This creates 6 concurrent tasks that run simultaneously:
-
-        INPUT TASKS (user → Gemini):
-        1. send_text(): Accept typed messages from console
-        2. listen_audio(): Capture microphone audio
-        3. get_frames()/get_screen(): Capture video
-        4. send_realtime(): Send all queued data to Gemini
-
-        OUTPUT TASKS (Gemini → user):
-        5. receive_audio(): Receive responses from Gemini
-        6. play_audio(): Play audio through speakers
-
-        **Session Management**:
-        - client.aio.live.connect() creates a WebSocket connection
-        - This connection persists for the entire conversation
-        - Default session limit is 10 minutes (can be extended)
-
-        **TaskGroup**:
-        - All tasks run concurrently
-        - If one task fails, all others are cancelled
+        TASK GROUP:
+        All tasks run concurrently in a TaskGroup:
+        - If any task fails, all are cancelled
         - Clean shutdown when user types 'q'
+
+        SESSION:
+        The Live API session is a WebSocket connection that:
+        - Maintains conversation context
+        - Handles VAD automatically
+        - Supports interruption
+        - Has a 10-minute default timeout (configurable)
         """
         try:
-            # Create Live API session (WebSocket connection to Gemini)
-            # and TaskGroup for managing concurrent tasks
+            # Create session and task group
             async with (
                 client.aio.live.connect(model=MODEL, config=CONFIG) as session,
                 asyncio.TaskGroup() as tg,
             ):
                 self.session = session
 
-                # Initialize queues for inter-task communication
-                self.audio_in_queue = asyncio.Queue()  # Gemini audio → speakers
-                self.out_queue = asyncio.Queue(maxsize=5)  # User input → Gemini
+                # Initialize queues
+                self.audio_in_queue = asyncio.Queue()
+                self.out_queue = asyncio.Queue(maxsize=5)
 
                 # Create all concurrent tasks
-                # send_text is the main task - when it completes (user types 'q'),
-                # we exit and cancel all other tasks
                 send_text_task = tg.create_task(self.send_text())
                 tg.create_task(self.send_realtime())
                 tg.create_task(self.listen_audio())
 
-                # Conditionally start video capture based on mode
+                # Start video capture (if enabled)
                 if self.video_mode == "camera":
                     tg.create_task(self.get_frames())
                 elif self.video_mode == "screen":
@@ -584,26 +508,33 @@ class AudioLoop:
                 raise asyncio.CancelledError("User requested exit")
 
         except asyncio.CancelledError:
-            # Normal exit - user typed 'q'
+            # Normal exit
             pass
         except ExceptionGroup as EG:
-            # Handle any errors from the tasks
-            self.audio_stream.close()
+            # Error in one of the tasks
+            if self.audio_stream:
+                self.audio_stream.close()
             traceback.print_exception(EG)
 
 
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
 if __name__ == "__main__":
     # Parse command-line arguments
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Gemini Live API Console Application"
+    )
     parser.add_argument(
         "--mode",
         type=str,
         default=DEFAULT_MODE,
-        help="pixels to stream from",
         choices=["camera", "screen", "none"],
+        help="Video mode: camera, screen, or none (audio only)"
     )
     args = parser.parse_args()
 
     # Create and run the audio loop
-    main = AudioLoop(video_mode=args.mode)
-    asyncio.run(main.run())
+    loop = AudioLoop(video_mode=args.mode)
+    asyncio.run(loop.run())
