@@ -197,10 +197,13 @@ class AudioLoop:
             # This replaces the deprecated session.send(input=text, end_of_turn=True)
             #
             # send_client_content is used for structured turns with explicit completion
-            # - turns: Content with role and parts (text/inline data)
+            # - turns: Content object with role and parts (text/inline data)
             # - turn_complete: Signals end of user's turn (triggers model response)
             await self.session.send_client_content(
-                turns={"role": "user", "parts": [{"text": text or "."}]},
+                turns=types.Content(
+                    role="user",
+                    parts=[types.Part(text=text or ".")]
+                ),
                 turn_complete=True
             )
 
