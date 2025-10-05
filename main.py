@@ -78,6 +78,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from google.genai.live import AsyncSession
+from google.genai.types import LiveConnectConfig, Modality
 
 # Load environment variables from .env file (including GOOGLE_API_KEY)
 load_dotenv()
@@ -112,7 +113,7 @@ client = genai.Client(http_options={"api_version": "v1beta"})
 # response_modalities determines the format of model's responses
 # ["AUDIO"] means the model will respond with spoken audio
 # Could also be ["TEXT"] for text-only responses
-CONFIG = {"response_modalities": ["AUDIO"]}
+CONFIG = LiveConnectConfig(response_modalities= [Modality.AUDIO])
 
 # Initialize PyAudio for handling audio input/output
 pya = pyaudio.PyAudio()
