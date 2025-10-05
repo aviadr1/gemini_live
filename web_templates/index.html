@@ -14,17 +14,42 @@
         </div>
 
         <div class="controls">
-            <div class="control-group">
-                <label>Video Mode:</label>
-                <select id="video-mode">
-                    <option value="camera">Camera</option>
-                    <option value="screen">Screen Share</option>
-                    <option value="none">Audio Only</option>
-                </select>
+            <div class="control-row">
+                <div class="control-group">
+                    <label>Video Mode:</label>
+                    <select id="video-mode">
+                        <option value="camera">📹 Camera</option>
+                        <option value="screen">🖥️ Screen Share</option>
+                        <option value="none">🔊 Audio Only</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <label>Frame Rate: <span id="fps-value">1.0</span> FPS</label>
+                    <input type="range" id="fps-slider" min="0.5" max="5" step="0.5" value="1.0">
+                    <span class="help-text">Higher = more responsive, but uses more bandwidth & API quota</span>
+                </div>
             </div>
 
-            <button id="start-btn" onclick="startSession()">Start Session</button>
-            <button id="stop-btn" onclick="stopSession()" disabled>Stop Session</button>
+            <div class="control-row">
+                <div class="control-group checkbox-group">
+                    <label>
+                        <input type="checkbox" id="narration-mode">
+                        <span>🎬 Video Narration Mode</span>
+                    </label>
+                    <span class="help-text">AI provides continuous commentary on video (great for fitness, cooking, tutorials)</span>
+                </div>
+
+                <div class="control-group" id="narration-interval-group" style="display: none;">
+                    <label>Feedback Interval: <span id="interval-value">5</span>s</label>
+                    <input type="range" id="interval-slider" min="3" max="15" step="1" value="5">
+                </div>
+            </div>
+
+            <div class="button-row">
+                <button id="start-btn" onclick="startSession()" class="primary-btn">▶️ Start Session</button>
+                <button id="stop-btn" onclick="stopSession()" disabled class="danger-btn">⏹️ Stop Session</button>
+            </div>
         </div>
 
         <div class="transcript-container">
@@ -38,8 +63,13 @@
         </div>
 
         <div class="info">
-            <p><strong>Note:</strong> Make sure to use headphones to prevent echo.</p>
-            <p>Speak naturally - the AI will respond when you finish speaking.</p>
+            <p><strong>💡 Tips:</strong></p>
+            <ul>
+                <li><strong>Use headphones</strong> to prevent echo and feedback</li>
+                <li><strong>Frame Rate:</strong> 1 FPS is usually sufficient. Increase for fast-moving content</li>
+                <li><strong>Narration Mode:</strong> Perfect for real-time feedback on exercises, cooking, or demonstrations</li>
+                <li><strong>Audio Quality:</strong> Speak clearly and pause briefly for the AI to respond naturally</li>
+            </ul>
         </div>
     </div>
 

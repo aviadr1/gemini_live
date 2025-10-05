@@ -12,6 +12,9 @@ KEY DIFFERENCE FROM CONSOLE VERSION:
 - Sends transcripts to browser UI in real-time
 - Tracks captured frames for visual display
 - Manages session via Eel (Python ↔ JavaScript bridge)
+NEW FEATURES:
+- Configurable frame rate (0.5 - 5 FPS)
+- Video narration mode for continuous AI feedback
 """
 
 import asyncio
@@ -24,6 +27,7 @@ from typing import Optional, Dict, Any, List
 import cv2
 import pyaudio
 import eel
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from google.genai.types import LiveConnectConfig, Modality
@@ -51,6 +55,8 @@ eel.init('web')
 # ============================================================================
 
 DEFAULT_MODE = "camera"
+DEFAULT_FPS = 1.0
+DEFAULT_NARRATION_INTERVAL = 5.0  # seconds between narration prompts
 MODEL = "models/gemini-2.0-flash-live-001"
 
 # Live API configuration with transcription enabled
@@ -79,35 +85,36 @@ stop_requested: bool = False
 
 class UIAudioLoop:
     """
-    Standalone audio loop for web UI - no inheritance, completely self-contained.
-
-    RESPONSIBILITIES:
-    - Capture audio from microphone
-    - Capture video/screen frames
-    - Send data to Gemini Live API
-    - Receive and play audio responses
-    - Send transcripts to browser UI
-    - Track frames for visual display
-
-    DESIGN:
-    Uses composition instead of inheritance - imports utility functions
-    for frame capture rather than inheriting from a parent class.
+    Standalone audio loop for web UI with configurable frame rate and narration mode.
     """
 
-    def __init__(self, video_mode: str = DEFAULT_MODE) -> None:
+    def __init__(
+        self,
+        video_mode: str = DEFAULT_MODE,
+        fps: float = DEFAULT_FPS,
+        narration_mode: bool = False,
+        narration_interval: float = DEFAULT_NARRATION_INTERVAL
+    ) -> None:
         """
         Initialize the UI audio loop.
 
         Args:
             video_mode: "camera", "screen", or "none"
+            fps: Frames per second (0.5 to 5.0)
+            narration_mode: Enable automatic video narration
+            narration_interval: Seconds between narration prompts
         """
         # Configuration
         self.video_mode: str = video_mode
+        self.fps: float = max(0.5, min(5.0, fps))  # Clamp between 0.5 and 5
+        self.frame_interval: float = 1.0 / self.fps
+        self.narration_mode: bool = narration_mode
+        self.narration_interval: float = narration_interval
         self.should_stop: bool = False
 
         # Communication queues
-        self.audio_in_queue: Optional[asyncio.Queue] = None  # Gemini → speakers
-        self.out_queue: Optional[asyncio.Queue] = None  # User → Gemini
+        self.audio_in_queue: Optional[asyncio.Queue] = None
+        self.out_queue: Optional[asyncio.Queue] = None
 
         # Session
         self.session: Optional[asyncio.Task] = None
@@ -122,79 +129,106 @@ class UIAudioLoop:
         self.frame_count: int = 0
         self.turn_start_time: Optional[float] = None
 
+        # Narration tracking
+        self.last_narration_time: float = 0
+
     # ========================================================================
     # VIDEO CAPTURE TASKS
     # ========================================================================
 
     async def capture_camera(self) -> None:
-        """
-        Capture frames from webcam and track for UI display.
-
-        DIFFERENCES FROM CONSOLE VERSION:
-        - Tracks latest_frame for UI display
-        - Counts frames per turn
-        - Same frame capture logic (via utility function)
-        """
-        # Open camera
+        """Capture frames from webcam at configured FPS."""
         cap = await asyncio.to_thread(cv2.VideoCapture, 0)
 
         while not self.should_stop:
-            # Use utility function for frame capture
             frame = await asyncio.to_thread(capture_camera_frame, cap)
 
             if frame is None:
                 break
 
-            # Track for UI display
             self.latest_frame = frame
             self.frame_count += 1
 
-            # Wait 1 second (1 FPS)
-            await asyncio.sleep(1.0)
-
-            # Queue for sending to Gemini
+            # Use configurable frame interval
+            await asyncio.sleep(self.frame_interval)
             await self.out_queue.put(frame)
 
         cap.release()
 
     async def capture_screen(self) -> None:
-        """
-        Capture screen and track for UI display.
-
-        Same as capture_camera() but for screen capture.
-        """
+        """Capture screen at configured FPS."""
         while not self.should_stop:
-            # Use utility function for screen capture
             frame = await asyncio.to_thread(capture_screen_frame)
 
             if frame is None:
                 break
 
-            # Track for UI display
             self.latest_frame = frame
             self.frame_count += 1
 
-            # Wait 1 second (1 FPS)
-            await asyncio.sleep(1.0)
-
-            # Queue for sending to Gemini
+            # Use configurable frame interval
+            await asyncio.sleep(self.frame_interval)
             await self.out_queue.put(frame)
+
+    # ========================================================================
+    # VIDEO NARRATION TASK
+    # ========================================================================
+
+    async def video_narrator(self) -> None:
+        """
+        Periodically send prompts to get AI narration of video content.
+
+        This is useful for:
+        - Fitness/yoga form feedback
+        - Cooking demonstrations
+        - Art/craft tutorials
+        - Any scenario where you want continuous AI commentary
+        """
+        narration_prompts = [
+            "What do you see? Provide brief feedback.",
+            "Describe what's happening and offer any suggestions.",
+            "Analyze the current activity and provide guidance.",
+        ]
+
+        prompt_index = 0
+
+        while not self.should_stop:
+            await asyncio.sleep(self.narration_interval)
+
+            if self.should_stop:
+                break
+
+            current_time = time.time()
+
+            # Only send if enough time has passed since last narration
+            if current_time - self.last_narration_time >= self.narration_interval:
+                try:
+                    prompt = narration_prompts[prompt_index % len(narration_prompts)]
+
+                    await self.session.send_client_content(
+                        turns=types.Content(
+                            role="user",
+                            parts=[types.Part(text=prompt)]
+                        ),
+                        turn_complete=True
+                    )
+
+                    self.last_narration_time = current_time
+                    prompt_index += 1
+
+                    print(f"[Narration prompt sent: {prompt}]")
+
+                except Exception as e:
+                    print(f"Failed to send narration prompt: {e}")
 
     # ========================================================================
     # AUDIO INPUT TASK
     # ========================================================================
 
     async def listen_audio(self) -> None:
-        """
-        Capture audio from microphone and queue for sending.
-
-        IDENTICAL TO CONSOLE VERSION:
-        No UI-specific logic needed here.
-        """
-        # Get default microphone
+        """Capture audio from microphone and queue for sending."""
         mic_info = pya.get_default_input_device_info()
 
-        # Open audio stream
         self.audio_stream = await asyncio.to_thread(
             pya.open,
             format=FORMAT,
@@ -208,14 +242,12 @@ class UIAudioLoop:
         kwargs = {"exception_on_overflow": False} if __debug__ else {}
 
         while not self.should_stop:
-            # Read audio chunk
             data = await asyncio.to_thread(
                 self.audio_stream.read,
                 CHUNK_SIZE,
                 **kwargs
             )
 
-            # Queue for sending
             await self.out_queue.put({
                 "data": data,
                 "mime_type": "audio/pcm"
@@ -226,19 +258,13 @@ class UIAudioLoop:
     # ========================================================================
 
     async def send_realtime(self) -> None:
-        """
-        Send queued data to Gemini in real-time.
-
-        IDENTICAL TO CONSOLE VERSION:
-        No UI-specific logic needed here.
-        """
+        """Send queued data to Gemini in real-time."""
         while not self.should_stop:
             msg = await self.out_queue.get()
 
             mime_type = msg.get("mime_type", "")
 
             if "audio" in mime_type:
-                # Send audio
                 await self.session.send_realtime_input(
                     audio=types.Blob(
                         data=msg["data"],
@@ -246,7 +272,6 @@ class UIAudioLoop:
                     )
                 )
             else:
-                # Send image/video
                 import base64
                 image_data = base64.b64decode(msg["data"])
 
@@ -258,7 +283,7 @@ class UIAudioLoop:
                 )
 
     # ========================================================================
-    # RESPONSE RECEIVER TASK (UI-SPECIFIC)
+    # RESPONSE RECEIVER TASK
     # ========================================================================
 
     async def receive_audio(self) -> None:
@@ -275,22 +300,18 @@ class UIAudioLoop:
             try:
                 turn = self.session.receive()
 
-                # TURN START: Reset state
                 self.current_gemini_transcript = []
                 self.frame_count = 0
                 self.turn_start_time = time.time()
 
-                # Process response chunks
                 async for response in turn:
                     if self.should_stop:
                         break
 
-                    # Audio data
                     if data := response.data:
                         self.audio_in_queue.put_nowait(data)
                         continue
 
-                    # Text response (TEXT mode)
                     if text := response.text:
                         try:
                             eel.add_message("gemini", text)
@@ -299,12 +320,10 @@ class UIAudioLoop:
                         print(text, end="")
                         continue
 
-                    # Input transcription (what YOU said)
                     if response.server_content.input_transcription:
                         transcript_text = response.server_content.input_transcription.text
                         self.current_user_transcript.append(transcript_text)
 
-                        # Send to UI in real-time
                         try:
                             eel.add_user_transcription(transcript_text)
                         except Exception as e:
@@ -312,12 +331,10 @@ class UIAudioLoop:
 
                         print(f"\n[You: {transcript_text}]", end="", flush=True)
 
-                    # Output transcription (what GEMINI is saying)
                     if response.server_content.output_transcription:
                         transcript_text = response.server_content.output_transcription.text
                         self.current_gemini_transcript.append(transcript_text)
 
-                        # Send to UI in real-time
                         try:
                             eel.add_gemini_transcription(transcript_text)
                         except Exception as e:
@@ -327,7 +344,6 @@ class UIAudioLoop:
 
                 # TURN END: Finalize transcripts
 
-                # Finalize user message
                 if self.current_user_transcript:
                     full_user_text = "".join(self.current_user_transcript)
                     try:
@@ -336,11 +352,9 @@ class UIAudioLoop:
                         print(f"Failed to finalize user message: {e}")
                     self.current_user_transcript = []
 
-                # Finalize Gemini message with frame data
                 if self.current_gemini_transcript:
                     full_gemini_text = "".join(self.current_gemini_transcript)
 
-                    # Prepare frame data if available
                     frame_data: Optional[Dict[str, Any]] = None
 
                     if self.video_mode != "none" and self.latest_frame:
@@ -353,7 +367,6 @@ class UIAudioLoop:
                             "duration": round(turn_duration, 1)
                         }
 
-                    # Send to UI
                     try:
                         eel.finalize_gemini_message(full_gemini_text, frame_data)
                     except Exception as e:
@@ -361,7 +374,6 @@ class UIAudioLoop:
 
                     self.current_gemini_transcript = []
 
-                # Clear audio queue (handles interruption)
                 while not self.audio_in_queue.empty():
                     self.audio_in_queue.get_nowait()
 
@@ -376,12 +388,7 @@ class UIAudioLoop:
     # ========================================================================
 
     async def play_audio(self) -> None:
-        """
-        Play audio responses through speakers.
-
-        IDENTICAL TO CONSOLE VERSION:
-        No UI-specific logic needed here.
-        """
+        """Play audio responses through speakers."""
         stream = await asyncio.to_thread(
             pya.open,
             format=FORMAT,
@@ -395,15 +402,11 @@ class UIAudioLoop:
             await asyncio.to_thread(stream.write, bytestream)
 
     # ========================================================================
-    # PLACEHOLDER FOR TEXT INPUT (UI doesn't use this)
+    # WAIT TASK
     # ========================================================================
 
     async def wait_for_stop(self) -> None:
-        """
-        Placeholder task that just waits for stop signal.
-
-        The UI sends text via send_message() instead of console input.
-        """
+        """Wait for stop signal."""
         while not self.should_stop:
             await asyncio.sleep(0.1)
 
@@ -413,22 +416,31 @@ class UIAudioLoop:
 # ============================================================================
 
 @eel.expose
-def start_session(mode: str = DEFAULT_MODE) -> Dict[str, str]:
-    """Start a new Gemini Live API session."""
+def start_session(
+    mode: str = DEFAULT_MODE,
+    fps: float = DEFAULT_FPS,
+    narration_mode: bool = False,
+    narration_interval: float = DEFAULT_NARRATION_INTERVAL
+) -> Dict[str, str]:
+    """Start a new Gemini Live API session with configuration."""
     global audio_loop, is_running, stop_requested
 
     if is_running:
         return {"status": "error", "message": "Session already running"}
 
     try:
-        print(f"Starting session with mode: {mode}")
+        print(f"Starting session: mode={mode}, fps={fps}, narration={narration_mode}")
         stop_requested = False
-        audio_loop = UIAudioLoop(video_mode=mode)
+        audio_loop = UIAudioLoop(
+            video_mode=mode,
+            fps=fps,
+            narration_mode=narration_mode,
+            narration_interval=narration_interval
+        )
 
         import threading
 
         def run_async_session() -> None:
-            """Run the async session in a separate thread."""
             global is_running
 
             time.sleep(0.5)
@@ -436,30 +448,35 @@ def start_session(mode: str = DEFAULT_MODE) -> Dict[str, str]:
             try:
                 print("Connecting to Gemini...")
                 is_running = True
-                eel.update_status("Connected - Session started")
+
+                status_msg = f"Connected - {mode.title()} @ {fps} FPS"
+                if narration_mode:
+                    status_msg += f" | Narration every {narration_interval}s"
+                eel.update_status(status_msg)
 
                 client = genai.Client(http_options={"api_version": "v1beta"})
 
                 async def run_with_config() -> None:
-                    """Set up and run all concurrent tasks."""
                     async with (
                         client.aio.live.connect(model=MODEL, config=UI_CONFIG) as session,
                         asyncio.TaskGroup() as tg,
                     ):
                         audio_loop.session = session
                         audio_loop.audio_in_queue = asyncio.Queue()
-                        audio_loop.out_queue = asyncio.Queue(maxsize=5)
+                        audio_loop.out_queue = asyncio.Queue(maxsize=20)
 
-                        # Create all tasks
                         wait_task = tg.create_task(audio_loop.wait_for_stop())
                         tg.create_task(audio_loop.send_realtime())
                         tg.create_task(audio_loop.listen_audio())
 
-                        # Start video capture if enabled
                         if audio_loop.video_mode == "camera":
                             tg.create_task(audio_loop.capture_camera())
                         elif audio_loop.video_mode == "screen":
                             tg.create_task(audio_loop.capture_screen())
+
+                        # Start video narrator if enabled
+                        if audio_loop.narration_mode:
+                            tg.create_task(audio_loop.video_narrator())
 
                         tg.create_task(audio_loop.receive_audio())
                         tg.create_task(audio_loop.play_audio())
@@ -528,10 +545,8 @@ def send_message(text: str) -> Dict[str, str]:
     try:
         print(f"Sending message: {text}")
 
-        # Show in UI
         eel.add_message("user", text)
 
-        # Send to Gemini
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
@@ -624,4 +639,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    load_dotenv()
     main()

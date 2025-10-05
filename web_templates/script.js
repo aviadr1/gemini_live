@@ -2,9 +2,46 @@ let isRunning = false;
 let currentGeminiMessage = null;
 let currentUserTranscript = null;
 
+// Update FPS display when slider changes
+document.addEventListener('DOMContentLoaded', function() {
+    const fpsSlider = document.getElementById('fps-slider');
+    const fpsValue = document.getElementById('fps-value');
+    const narrationMode = document.getElementById('narration-mode');
+    const intervalGroup = document.getElementById('narration-interval-group');
+    const intervalSlider = document.getElementById('interval-slider');
+    const intervalValue = document.getElementById('interval-value');
+    const messageInput = document.getElementById('message-input');
+
+    // FPS slider
+    fpsSlider.addEventListener('input', function() {
+        fpsValue.textContent = this.value;
+    });
+
+    // Narration mode toggle
+    narrationMode.addEventListener('change', function() {
+        intervalGroup.style.display = this.checked ? 'flex' : 'none';
+    });
+
+    // Interval slider
+    intervalSlider.addEventListener('input', function() {
+        intervalValue.textContent = this.value;
+    });
+
+    // Enter key to send message
+    messageInput.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') {
+            sendMessage();
+        }
+    });
+});
+
 async function startSession() {
     const mode = document.getElementById('video-mode').value;
-    const result = await eel.start_session(mode)();
+    const fps = parseFloat(document.getElementById('fps-slider').value);
+    const narrationMode = document.getElementById('narration-mode').checked;
+    const narrationInterval = parseInt(document.getElementById('interval-slider').value);
+
+    const result = await eel.start_session(mode, fps, narrationMode, narrationInterval)();
 
     if (result.status === 'success') {
         setTimeout(() => {
@@ -47,6 +84,9 @@ function updateUIState(running) {
     document.getElementById('message-input').disabled = !running;
     document.getElementById('send-btn').disabled = !running;
     document.getElementById('video-mode').disabled = running;
+    document.getElementById('fps-slider').disabled = running;
+    document.getElementById('narration-mode').disabled = running;
+    document.getElementById('interval-slider').disabled = running;
 }
 
 eel.expose(update_status);
@@ -177,11 +217,3 @@ function escapeHtml(text) {
     div.textContent = text;
     return div.innerHTML;
 }
-
-document.addEventListener('DOMContentLoaded', function() {
-    document.getElementById('message-input').addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') {
-            sendMessage();
-        }
-    });
-});
