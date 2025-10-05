@@ -76,6 +76,7 @@ import argparse
 
 from dotenv import load_dotenv
 from google import genai
+from google.genai.live import AsyncSession
 
 # Load environment variables from .env file (including GOOGLE_API_KEY)
 load_dotenv()
@@ -148,16 +149,16 @@ class AudioLoop:
 
         # Queues for managing data flow between tasks
         # These enable asynchronous communication between different parts of the system
-        self.audio_in_queue = None  # Queue for audio coming FROM Gemini (to be played)
-        self.out_queue = None  # Queue for data going TO Gemini (audio/video/text)
+        self.audio_in_queue: Optional[asyncio.Queue] = None  # Queue for audio coming FROM Gemini (to be played)
+        self.out_queue: Optional[asyncio.Queue] = None  # Queue for data going TO Gemini (audio/video/text)
 
         # The Live API session object - represents the WebSocket connection
-        self.session = None
+        self.session: Optional[AsyncSession] = None
 
         # Task references (not actively used but kept for potential cleanup)
-        self.send_text_task = None
-        self.receive_audio_task = None
-        self.play_audio_task = None
+        self.send_text_task: Optional[asyncio.Task] = None
+        self.receive_audio_task: Optional[asyncio.Task] = None
+        self.play_audio_task: Optional[asyncio.Task] = None
 
     async def send_text(self) -> None:
         """
